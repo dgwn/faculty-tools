@@ -100,9 +100,7 @@ The MySQL docker image automatically creates the user, password, and database
 name set in the `docker-compose.yml` file.
 
 ```sh
-docker-compose run --rm lti python
-from lti import db
-db.create_all()
+make create-db
 ```
 
 If you want to look at your users table in the future, you can do so in the
@@ -119,7 +117,13 @@ Users.query.all()
 It's time to use docker-compose to bring up the application.
 
 ```sh
-docker-compose up -d
+make start-daemon
+```
+
+You can also run the app in the foreground with:
+
+```sh
+docker-compose up
 ```
 
 Go to the /xml page, <http://127.0.0.1:9001/xml> by default.
@@ -128,10 +132,10 @@ Copy the xml, and install it into a course (Course->Settings->Apps).
 
 ## View the Logs
 
-To view the logs while the application is running use this docker command:
+To view the logs while the application is running use this command:
 
 ```sh
-docker-compose logs -f
+make logs
 ```
 
 ## Stopping the App
@@ -139,5 +143,5 @@ docker-compose logs -f
 To shutdown Faculty Tools
 
 ```sh
-docker-compose down
+make stop
 ```
