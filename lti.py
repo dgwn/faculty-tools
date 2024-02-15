@@ -224,7 +224,7 @@ def index(lti=lti):
     )
 
     try:
-        tools_by_category, cagetory_order = filter_tool_list(
+        tools_by_category, category_order = filter_tool_list(
             session["course_id"], session["api_key"]
         )
     except CanvasException:
@@ -243,7 +243,7 @@ def index(lti=lti):
     return render_template(
         "main_template.html",
         tools_by_category=tools_by_category,
-        category_order=cagetory_order,
+        category_order=category_order,
         course=session["course_id"],
     )
 

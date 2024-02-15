@@ -1,4 +1,4 @@
-version: '3.1'
+version: "3.1"
 
 services:
   lti:
@@ -12,6 +12,8 @@ services:
       - .env
     depends_on:
       - db
+    volumes:
+      - .:/app
 
   db:
     image: mysql:5.7
@@ -26,8 +28,4 @@ services:
     ports:
       - "33061:3306"
 volumes:
-    ft_dbdata: {}
-
-
-
-
+  ft_dbdata: {}

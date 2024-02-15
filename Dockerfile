@@ -1,7 +1,8 @@
-FROM python:3.7 as base
+FROM python:3.12 as base
 ARG REQUIREMENTS
 COPY requirements.txt /app/
 COPY test_requirements.txt /app/
+# RUN pip install --upgrade pip
 RUN pip install -r /app/$REQUIREMENTS
 WORKDIR /app
 COPY ./ /app/
