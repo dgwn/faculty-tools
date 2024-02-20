@@ -54,7 +54,27 @@ logs: ## View container logs (optionally specifying a service name, like `lti`)
 #=================================
 # Application management commands
 #=================================
-create-db:
-	@echo "Initializing the database"
-	docker-compose up -d lti
-	docker-compose exec lti python -c "from lti import app, db; app.app_context().push(); db.create_all()"
+
+# TODO ensure the new way using `db-init` covers same actions
+# create-db:
+# 	@echo "Initializing the database"
+# 	docker-compose up -d lti
+# 	docker-compose exec lti python -c "from lti import app, db; app.app_context().push(); db.create_all()"
+
+db-init: ## Initialize the database
+    ${DOCKER_COMPOSE} run --rm -e FLASK_APP=lti.py lti flask db init
+
+migrate-run: ## Run an existing DB migration
+	${DOCKER_COMPOSE} run --rm -e FLASK_APP=lti.py lti flask db upgrade
+
+makemigrations: ## Create a new DB migration
+	${DOCKER_COMPOSE} run --rm -e FLASK_APP=lti.py lti flask db migrate
+
+generate-keys: ## Create new public and private keys and assign them to a keyset
+	${DOCKER_COMPOSE} run --rm -e FLASK_APP=lti.py lti flask  generate_keys
+
+register: ## Add a new registration for Zapt in a platform
+	${DOCKER_COMPOSE} run --rm -e FLASK_APP=lti.py lti flask register
+
+deploy: ## Add a new deployment for Zapt to an existing registration
+	${DOCKER_COMPOSE} run --rm -e FLASK_APP=lti.py lti flask deploy

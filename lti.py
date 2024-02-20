@@ -1,6 +1,8 @@
 import logging
 from logging import Formatter, INFO
+from urllib.parse import urlparse
 import json
+import functools
 import os
 import sys
 import time
@@ -17,19 +19,37 @@ from flask import (
     send_from_directory,
 )
 from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
+from flask_caching import Cache
 from sqlalchemy import text
 import jinja2
-from pylti.flask import lti
+
+# from pylti.flask import lti
+
+from pylti1p3.contrib.flask import (
+    FlaskCacheDataStorage,
+    FlaskMessageLaunch,
+    FlaskOIDCLogin,
+    FlaskRequest,
+)
+from pylti1p3.deep_link_resource import DeepLinkResource
+from pylti1p3.tool_config import ToolConfDict
+
 import requests
 from requests.exceptions import HTTPError
 
 from utils import filter_tool_list, slugify
 
+from cli import register_cli
+
 app = Flask(__name__)
 app.config.from_object(os.environ.get("CONFIG", "config.DevelopmentConfig"))
 app.secret_key = app.config["SECRET_KEY"]
 
+cache = Cache(app, config={"CACHE_TYPE": "simple"})
 db = SQLAlchemy(app)
+migrate = Migrate(app, db)
+register_cli(app)
 
 
 def select_theme_dirs():
@@ -57,7 +77,9 @@ handler.setFormatter(
 app.logger.addHandler(handler)
 
 
-# DB Model
+# ============================================
+# DB Models
+# ============================================
 class Users(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, unique=True)
@@ -73,7 +95,47 @@ class Users(db.Model):
         return "<User %r>" % self.user_id
 
 
+class Key(db.Model):
+    __tablename__ = "key"
+    id = db.Column(db.Integer, primary_key=True)
+    key_set_id = db.Column(db.Integer, db.ForeignKey("key_set.id"), nullable=False)
+    public_key = db.Column(db.Text, nullable=False)
+    private_key = db.Column(db.Text, nullable=False)
+    alg = db.Column(db.Text, nullable=False)  # defaults to RS256
+
+
+class KeySet(db.Model):
+    __tablename__ = "key_set"
+    id = db.Column(db.Integer, primary_key=True)
+    registrations = db.relationship("Registration", backref="key_set", lazy=True)
+    keys = db.relationship("Key", backref="key_set", lazy=True)
+
+
+class Registration(db.Model):
+    __tablename__ = "registration"
+    id = db.Column(db.Integer, primary_key=True)
+    issuer = db.Column(db.String(255), nullable=False)
+    client_id = db.Column(db.String(255), nullable=False)
+    platform_login_auth_endpoint = db.Column(db.String(255), nullable=False)
+    platform_service_auth_endpoint = db.Column(db.String(255), nullable=False)
+    platform_jwks_endpoint = db.Column(db.String(255), nullable=False)
+    key_set_id = db.Column(db.Integer, db.ForeignKey("key_set.id"), nullable=False)
+    deployments = db.relationship("Deployment", backref="registration", lazy=True)
+    __table_args__ = (db.UniqueConstraint("issuer", "client_id"),)
+
+
+class Deployment(db.Model):
+    __tablename__ = "deployment"
+    id = db.Column(db.Integer, primary_key=True)
+    deployment_id = db.Column(db.String(255), nullable=False)
+    registration_id = db.Column(
+        db.Integer, db.ForeignKey("registration.id"), nullable=False
+    )
+
+
+# ============================================
 # Utility Functions
+# ============================================
 @app.context_processor
 def ga_utility_processor():
     def google_analytics():
@@ -125,19 +187,66 @@ def _slugify(string):
     return slugify(string)
 
 
+def get_lti_config():
+    registrations = Registration.query.all()
+
+    from collections import defaultdict
+
+    settings = defaultdict(list)
+    for registration in registrations:
+        settings[registration.issuer].append(
+            {
+                "client_id": registration.client_id,
+                "auth_login_url": registration.platform_login_auth_endpoint,
+                "auth_token_url": registration.platform_service_auth_endpoint,
+                "auth_audience": "null",  # TODO: figure out what this is for?
+                "key_set_url": registration.platform_jwks_endpoint,
+                "key_set": None,
+                "deployment_ids": [d.deployment_id for d in registration.deployments],
+            }
+        )
+
+    # TODO: figure out more elegant way to set public/private keys without double loop
+    tool_conf = ToolConfDict(settings)
+    for registration in registrations:
+        # Currently pylti1.3 only allows one key per client id. For now just set first one.
+        key = registration.key_set.keys[0]
+        tool_conf.set_private_key(
+            registration.issuer,
+            # ensure type is string not bytes (varies based on DB type)
+            (
+                key.private_key
+                if isinstance(key.private_key, str)
+                else key.private_key.decode("utf-8")
+            ),
+            client_id=registration.client_id,
+        )
+        tool_conf.set_public_key(
+            registration.issuer,
+            # ensure type is string not bytes (varies based on DB type)
+            (
+                key.public_key
+                if isinstance(key.public_key, str)
+                else key.public_key.decode("utf-8")
+            ),
+            client_id=registration.client_id,
+        )
+    return tool_conf
+
+
 def return_error(msg):
     return render_template("error.html", msg=msg)
 
 
 # for the pylti decorator
-def error(exception=None):
-    app.logger.error("PyLTI error: {}".format(exception))
-    return return_error(
-        (
-            "Authentication error, please refresh and try again. If this error "
-            "persists, please contact support."
-        )
-    )
+# def error(exception=None):
+#     app.logger.error("PyLTI error: {}".format(exception))
+#     return return_error(
+#         (
+#             "Authentication error, please refresh and try again. If this error "
+#             "persists, please contact support."
+#         )
+#     )
 
 
 @app.route("/themes/static/<path:filename>")
@@ -146,10 +255,85 @@ def theme_static(filename):  # pragma: nocover
     return send_from_directory(static_dir, filename)
 
 
+# ============================================
+# LTI 1.3
+# ============================================
+def get_launch_data_storage():
+    return FlaskCacheDataStorage(cache)
+
+
+# LTI Protector - only allow access to routes if user has been authenticated and has a launch ID
+def lti_required(func):
+    @functools.wraps(func)
+    def secure_function(*args, **kwargs):
+        if "launch_id" not in session:
+            return (
+                "<h2>Unauthorized</h2><p>You must use this tool in an LTI context.</p>",
+                401,
+            )
+        return func(*args, **kwargs)
+
+    return secure_function
+
+
+@app.route("/login/", methods=["GET", "POST"])
+def login():
+    tool_conf = get_lti_config()
+
+    launch_data_storage = get_launch_data_storage()
+
+    flask_request = FlaskRequest()
+
+    target_link_uri = flask_request.get_param("target_link_uri")
+    if not target_link_uri:
+        raise Exception('Missing "target_link_uri" param')
+
+    oidc_login = FlaskOIDCLogin(
+        flask_request, tool_conf, launch_data_storage=launch_data_storage
+    )
+    return oidc_login.enable_check_cookies(
+        main_msg="Your browser prohibits saving cookies in an iframe.",
+        click_msg="Click here to open the application in a new tab.",
+    ).redirect(target_link_uri)
+
+
+@app.route("/launch/", methods=["POST"])
+def launch():
+    tool_conf = get_lti_config()
+
+    flask_request = FlaskRequest()
+    launch_data_storage = get_launch_data_storage()
+    message_launch = FlaskMessageLaunch(
+        flask_request, tool_conf, launch_data_storage=launch_data_storage
+    )
+    session["launch_id"] = message_launch.get_launch_id()
+    session["course_id"] = message_launch.get_launch_data()[
+        "https://purl.imsglobal.org/spec/lti/claim/custom"
+    ]["canvas_course_id"]
+    session["canvas_user_id"] = message_launch.get_launch_data()[
+        "https://purl.imsglobal.org/spec/lti/claim/custom"
+    ]["canvas_course_id"]
+
+    session["error"] = False
+
+    # redirect to the oauth flow
+    return redirect(url_for("auth"))
+
+
+@app.route("/jwks/", methods=["GET"])
+def get_jwks():
+    return get_lti_config().get_jwks()
+
+
+# ============================================
 # Web Views / Routes
+# ============================================
+
+
 @app.route("/")
-@lti(error=error, role="staff", app=app)
-def index(lti=lti):
+@lti_required
+# @lti(error=error, role="staff", app=app)
+def index():
     """
     Main entry point to web application, get all whitelisted LTIs and send the data to the template
     """
@@ -240,6 +424,9 @@ def index(lti=lti):
         app.logger.exception(msg)
         return return_error(msg)
 
+    # Clear the launch_id from session to prevent re-using
+    session.pop("launch_id", None)
+
     return render_template(
         "main_template.html",
         tools_by_category=tools_by_category,
@@ -318,11 +505,25 @@ def xml():
     )
 
 
+@app.route("/lticonfig/", methods=["GET"])
+def config():
+    domain = urlparse(request.url_root).netloc
+    return Response(
+        render_template(
+            "lti.json",
+            domain=domain,
+            url_scheme=app.config["PREFERRED_URL_SCHEME"],
+        ),
+        mimetype="application/json",
+    )
+
+
 # OAuth login
 # Redirect URI
 @app.route("/oauthlogin", methods=["POST", "GET"])
-@lti(error=error, request="session", role="staff", app=app)
-def oauth_login(lti=lti):
+@lti_required
+# @lti(error=error, request="session", role="staff", app=app)
+def oauth_login():
 
     code = request.args.get("code")
 
@@ -521,10 +722,11 @@ def refresh_access_token(user):
 
 # Checking the user in the db
 @app.route("/auth", methods=["POST", "GET"])
-@lti(error=error, request="initial", role="staff", app=app)
-def auth(lti=lti):
-    session["course_id"] = request.form.get("custom_canvas_course_id")
-    session["canvas_user_id"] = request.form.get("custom_canvas_user_id")
+@lti_required
+# @lti(error=error, request="initial", role="staff", app=app)
+def auth():
+    # session["course_id"] = request.form.get("custom_canvas_course_id")
+    # session["canvas_user_id"] = request.form.get("custom_canvas_user_id")
 
     # Try to grab the user
     user = Users.query.filter_by(user_id=int(session["canvas_user_id"])).first()
@@ -606,8 +808,8 @@ def auth(lti=lti):
 
 
 @app.route("/get_sessionless_url/<lti_id>/<is_course_nav>")
-@lti(error=error, role="staff", app=app)
-def get_sessionless_url(lti_id, is_course_nav, lti=lti):
+# @lti(error=error, role="staff", app=app)
+def get_sessionless_url(lti_id, is_course_nav):
     sessionless_launch_url = None
 
     if is_course_nav == "True":

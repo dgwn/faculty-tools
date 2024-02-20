@@ -5,6 +5,8 @@ class BaseConfig(object):
     DEBUG = False
     TESTING = False
 
+    PREFERRED_URL_SCHEME = "https"
+
     # make the warning shut up until Flask-SQLAlchemy v3 comes out
     SQLALCHEMY_TRACK_MODIFICATIONS = True
 
@@ -31,22 +33,22 @@ class BaseConfig(object):
     SECRET_KEY = os.environ.get("SECRET_KEY")
 
     # LTI consumer key and shared secret
-    CONSUMER_KEY = os.environ.get("LTI_KEY")
-    SHARED_SECRET = os.environ.get("LTI_SECRET")
+    # CONSUMER_KEY = os.environ.get("LTI_KEY")
+    # SHARED_SECRET = os.environ.get("LTI_SECRET")
 
     # Configuration for pylti library. Uses the above key and secret
-    PYLTI_CONFIG = {
-        "consumers": {CONSUMER_KEY: {"secret": SHARED_SECRET}},
-        # Custom configurable roles
-        "roles": {
-            "staff": [
-                "urn:lti:instrole:ims/lis/Administrator",
-                "Instructor",
-                "ContentDeveloper",
-                "urn:lti:role:ims/lis/TeachingAssistant",
-            ]
-        },
-    }
+    # PYLTI_CONFIG = {
+    #     "consumers": {CONSUMER_KEY: {"secret": SHARED_SECRET}},
+    #     # Custom configurable roles
+    #     "roles": {
+    #         "staff": [
+    #             "urn:lti:instrole:ims/lis/Administrator",
+    #             "Instructor",
+    #             "ContentDeveloper",
+    #             "urn:lti:role:ims/lis/TeachingAssistant",
+    #         ]
+    #     },
+    # }
 
     # The "Oauth2 Redirect URI" that you provided to Instructure.
     # Set in .env file
