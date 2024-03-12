@@ -62,13 +62,16 @@ logs: ## View container logs (optionally specifying a service name, like `lti`)
 # 	docker-compose exec lti python -c "from lti import app, db; app.app_context().push(); db.create_all()"
 
 db-init: ## Initialize the database
-    ${DOCKER_COMPOSE} run --rm -e FLASK_APP=lti.py lti flask db init
+  ${DOCKER_COMPOSE} run --rm -e FLASK_APP=lti.py lti flask db init
+
+makemigrations: ## Create a new DB migration
+	${DOCKER_COMPOSE} run --rm -e FLASK_APP=lti.py lti flask db migrate
 
 migrate-run: ## Run an existing DB migration
 	${DOCKER_COMPOSE} run --rm -e FLASK_APP=lti.py lti flask db upgrade
 
-makemigrations: ## Create a new DB migration
-	${DOCKER_COMPOSE} run --rm -e FLASK_APP=lti.py lti flask db migrate
+downgrade: ## Downgrade the database
+	${DOCKER_COMPOSE} run --rm -e FLASK_APP=lti.py lti flask db downgrade
 
 generate-keys: ## Create new public and private keys and assign them to a keyset
 	${DOCKER_COMPOSE} run --rm -e FLASK_APP=lti.py lti flask  generate_keys

@@ -85,11 +85,13 @@ class Users(db.Model):
     user_id = db.Column(db.Integer, unique=True)
     refresh_key = db.Column(db.String(255))
     expires_in = db.Column(db.BigInteger)
+    api_key = db.Column(db.String(255))
 
-    def __init__(self, user_id, refresh_key, expires_in):
+    def __init__(self, user_id, refresh_key, expires_in, api_key):
         self.user_id = user_id
         self.refresh_key = refresh_key
         self.expires_in = expires_in
+        self.api_key = api_key
 
     def __repr__(self):
         return "<User %r>" % self.user_id
@@ -262,18 +264,46 @@ def get_launch_data_storage():
     return FlaskCacheDataStorage(cache)
 
 
-# LTI Protector - only allow access to routes if user has been authenticated and has a launch ID
-def lti_required(func):
-    @functools.wraps(func)
-    def secure_function(*args, **kwargs):
-        if "launch_id" not in session:
-            return (
-                "<h2>Unauthorized</h2><p>You must use this tool in an LTI context.</p>",
-                401,
-            )
-        return func(*args, **kwargs)
+def lti_required(role=None):
+    """
+    LTI Protector - only allow access to routes if user has been authenticated and has a launch ID.
+    You can also pass in a role to restrict access to certain roles e.g. @lti_required(role="staff")
 
-    return secure_function
+    Args:
+        role (str, optional): The role to restrict access to. Defaults to None.
+
+    Returns:
+        function: The decorated function.
+    """
+
+    def decorator(func):
+        @functools.wraps(func)
+        def secure_function(*args, **kwargs):
+            if "launch_id" not in session:
+                return (
+                    "<h2>Unauthorized</h2><p>You must use this tool in an LTI context.</p>",
+                    401,
+                )
+
+            if role == "staff":
+                if "roles" not in session or (
+                    "http://purl.imsglobal.org/vocab/lis/v2/institution/person#Administrator"
+                    not in session["roles"]
+                    and "http://purl.imsglobal.org/vocab/lis/v2/membership#Administrator"
+                    not in session["roles"]
+                    and "http://purl.imsglobal.org/vocab/lis/v2/membership#Instructor"
+                    not in session["roles"]
+                ):
+                    return (
+                        "<h2>Unauthorized</h2><p>You must be faculty to use this tool.</p>",
+                        401,
+                    )
+
+            return func(*args, **kwargs)
+
+        return secure_function
+
+    return decorator
 
 
 @app.route("/login/", methods=["GET", "POST"])
@@ -312,8 +342,10 @@ def launch():
     ]["canvas_course_id"]
     session["canvas_user_id"] = message_launch.get_launch_data()[
         "https://purl.imsglobal.org/spec/lti/claim/custom"
-    ]["canvas_course_id"]
-
+    ]["canvas_user_id"]
+    session["roles"] = message_launch.get_launch_data()[
+        "https://purl.imsglobal.org/spec/lti/claim/roles"
+    ]
     session["error"] = False
 
     # redirect to the oauth flow
@@ -331,14 +363,15 @@ def get_jwks():
 
 
 @app.route("/")
-@lti_required
+@lti_required(role="staff")
 # @lti(error=error, role="staff", app=app)
 def index():
     """
     Main entry point to web application, get all whitelisted LTIs and send the data to the template
     """
-
-    if "api_key" not in session:
+    user = Users.query.filter_by(user_id=int(session["canvas_user_id"])).first()
+    api_key = user.api_key
+    if api_key is None:
         app.logger.error("api_key not set")
         return return_error(
             (
@@ -348,7 +381,7 @@ def index():
         )
 
     # Test API key to see if they need to reauthenticate
-    auth_header = {"Authorization": "Bearer " + session["api_key"]}
+    auth_header = {"Authorization": "Bearer " + api_key}
     r = requests.get(app.config["API_URL"] + "users/self", headers=auth_header)
     if "WWW-Authenticate" in r.headers:
         # reroll oauth
@@ -409,7 +442,7 @@ def index():
 
     try:
         tools_by_category, category_order = filter_tool_list(
-            session["course_id"], session["api_key"]
+            session["course_id"], api_key
         )
     except CanvasException:
         app.logger.exception("Couldn't connect to Canvas")
@@ -423,9 +456,6 @@ def index():
         msg = "There is something wrong with the whitelist.json file"
         app.logger.exception(msg)
         return return_error(msg)
-
-    # Clear the launch_id from session to prevent re-using
-    session.pop("launch_id", None)
 
     return render_template(
         "main_template.html",
@@ -521,7 +551,7 @@ def config():
 # OAuth login
 # Redirect URI
 @app.route("/oauthlogin", methods=["POST", "GET"])
-@lti_required
+@lti_required(role="staff")
 # @lti(error=error, request="session", role="staff", app=app)
 def oauth_login():
 
@@ -558,10 +588,8 @@ def oauth_login():
         )
 
     if "access_token" in r.json():
-        session["api_key"] = r.json()["access_token"]
-
-        if "refresh_token" in r.json():
-            session["refresh_token"] = r.json()["refresh_token"]
+        api_key = r.json()["access_token"]
+        refresh_token = r.json()["refresh_token"]
 
         if "expires_in" in r.json():
             # expires in seconds
@@ -575,8 +603,9 @@ def oauth_login():
             if user is not None:
                 try:
                     # update the current user's expiration time in db
-                    user.refresh_key = session["refresh_token"]
+                    user.refresh_key = refresh_token
                     user.expires_in = session["expires_in"]
+                    user.api_key = api_key
                     db.session.add(user)
                     db.session.commit()
                 except Exception:
@@ -596,8 +625,9 @@ def oauth_login():
                     # add new user to db
                     new_user = Users(
                         session["canvas_user_id"],
-                        session["refresh_token"],
+                        refresh_token,
                         session["expires_in"],
+                        api_key,
                     )
                     db.session.add(new_user)
                     db.session.commit()
@@ -722,11 +752,9 @@ def refresh_access_token(user):
 
 # Checking the user in the db
 @app.route("/auth", methods=["POST", "GET"])
-@lti_required
+@lti_required(role="staff")
 # @lti(error=error, request="initial", role="staff", app=app)
 def auth():
-    # session["course_id"] = request.form.get("custom_canvas_course_id")
-    # session["canvas_user_id"] = request.form.get("custom_canvas_user_id")
 
     # Try to grab the user
     user = Users.query.filter_by(user_id=int(session["canvas_user_id"])).first()
@@ -750,7 +778,7 @@ def auth():
     expiration_date = user.expires_in
 
     # If expired or no api_key
-    if int(time.time()) > expiration_date or "api_key" not in session:
+    if int(time.time()) > expiration_date or not user.api_key:
         readable_time = time.strftime(
             "%a, %d %b %Y %H:%M:%S", time.localtime(user.expires_in)
         )
@@ -764,7 +792,7 @@ def auth():
         refresh = refresh_access_token(user)
 
         if refresh["access_token"] and refresh["expiration_date"]:
-            session["api_key"] = refresh["access_token"]
+            user.api_key = refresh["access_token"]
             session["expires_in"] = refresh["expiration_date"]
             return redirect(url_for("index"))
         else:
@@ -779,7 +807,7 @@ def auth():
             )
     else:
         # API key that shouldn't be expired. Test it.
-        auth_header = {"Authorization": "Bearer " + session["api_key"]}
+        auth_header = {"Authorization": "Bearer " + user.api_key}
         r = requests.get(
             app.config["API_URL"] + "users/%s/profile" % (session["canvas_user_id"]),
             headers=auth_header,
@@ -812,8 +840,10 @@ def auth():
 def get_sessionless_url(lti_id, is_course_nav):
     sessionless_launch_url = None
 
+    user = Users.query.filter_by(user_id=int(session["canvas_user_id"])).first()
+
     if is_course_nav == "True":
-        auth_header = {"Authorization": "Bearer " + session["api_key"]}
+        auth_header = {"Authorization": "Bearer " + user.api_key}
         # get sessionless launch url for things that come from course nav
         url = (
             "{0}courses/{1}/external_tools/sessionless_launch?id={2}"
@@ -841,7 +871,7 @@ def get_sessionless_url(lti_id, is_course_nav):
             sessionless_launch_url = r.json()["url"]
 
     if sessionless_launch_url is None:
-        auth_header = {"Authorization": "Bearer " + session["api_key"]}
+        auth_header = {"Authorization": "Bearer " + user.api_key}
         # get sessionless launch url
         r = requests.get(
             app.config["API_URL"]
