@@ -364,7 +364,6 @@ def get_jwks():
 
 @app.route("/")
 @lti_required(role="staff")
-# @lti(error=error, role="staff", app=app)
 def index():
     """
     Main entry point to web application, get all whitelisted LTIs and send the data to the template
@@ -552,7 +551,6 @@ def config():
 # Redirect URI
 @app.route("/oauthlogin", methods=["POST", "GET"])
 @lti_required(role="staff")
-# @lti(error=error, request="session", role="staff", app=app)
 def oauth_login():
 
     code = request.args.get("code")
@@ -753,7 +751,6 @@ def refresh_access_token(user):
 # Checking the user in the db
 @app.route("/auth", methods=["POST", "GET"])
 @lti_required(role="staff")
-# @lti(error=error, request="initial", role="staff", app=app)
 def auth():
 
     # Try to grab the user
@@ -836,7 +833,6 @@ def auth():
 
 
 @app.route("/get_sessionless_url/<lti_id>/<is_course_nav>")
-# @lti(error=error, role="staff", app=app)
 def get_sessionless_url(lti_id, is_course_nav):
     sessionless_launch_url = None
 
