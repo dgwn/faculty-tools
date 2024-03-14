@@ -275,29 +275,52 @@ def lti_required(role=None):
     Returns:
         function: The decorated function.
     """
+    # TODO: allow multiple roles simultaneously (e.g. ["staff", "student"])
+    # TODO: Make these roles configurable via settings, with some defaults
+    role_config = {
+        "admin": [
+            "http://purl.imsglobal.org/vocab/lis/v2/institution/person#Administrator",
+            "http://purl.imsglobal.org/vocab/lis/v2/membership#Administrator",
+        ],
+        "staff": [
+            "http://purl.imsglobal.org/vocab/lis/v2/institution/person#Administrator",
+            "http://purl.imsglobal.org/vocab/lis/v2/membership#Administrator",
+            "http://purl.imsglobal.org/vocab/lis/v2/membership#Instructor",
+        ],
+        "student": ["http://purl.imsglobal.org/vocab/lis/v2/membership#Learner"],
+    }
 
     def decorator(func):
         @functools.wraps(func)
         def secure_function(*args, **kwargs):
+            # Ensure the requested role is in the role configuration. This is mostly for if we publish this code elsewhere.
+            if role not in role_config:
+                app.logger.error(f"Invalid role: {role}")
+                return (
+                    "<h2>Unauthorized</h2><p>Invalid role configuration. Please contact support.</p>",
+                    401,
+                )
+
             if "launch_id" not in session:
                 return (
+                    # TODO: improve this message to be more user-friendly
                     "<h2>Unauthorized</h2><p>You must use this tool in an LTI context.</p>",
                     401,
                 )
 
-            if role == "staff":
-                if "roles" not in session or (
-                    "http://purl.imsglobal.org/vocab/lis/v2/institution/person#Administrator"
-                    not in session["roles"]
-                    and "http://purl.imsglobal.org/vocab/lis/v2/membership#Administrator"
-                    not in session["roles"]
-                    and "http://purl.imsglobal.org/vocab/lis/v2/membership#Instructor"
-                    not in session["roles"]
-                ):
-                    return (
-                        "<h2>Unauthorized</h2><p>You must be faculty to use this tool.</p>",
-                        401,
-                    )
+            if "roles" not in session:
+                return (
+                    "<h2>Unauthorized</h2><p>No roles found.</p>",
+                    401,
+                )
+
+            if not any(
+                role_vocab in session["roles"] for role_vocab in role_config[role]
+            ):
+                return (
+                    f"<h2>Unauthorized</h2><p>You must be have the {role} role to use this tool.</p>",
+                    401,
+                )
 
             return func(*args, **kwargs)
 
